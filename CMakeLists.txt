@@ -1,5 +1,6 @@
 project(proc_mon)
 cmake_minimum_required(VERSION 2.8)
+add_definitions(-std=c++11)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PROCPS libprocps REQUIRED)
 add_custom_target(pstream SOURCES pstream.h)
