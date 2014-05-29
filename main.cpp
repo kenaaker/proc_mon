@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <sys/sysinfo.h>
 #include <string.h>
+#include <list>
 
 #include <proc/readproc.h>
 #include <proc/wchan.h>
@@ -19,7 +20,7 @@ typedef struct xfer_hdr {
     unsigned short proc_info_len;
     unsigned int cmdline_offset;
     unsigned short cmdline_len;
-    unsigned short wchan_offset;
+    unsigned int wchan_offset;
     unsigned short wchan_len;
 } xfer_hdr_t;
 
@@ -53,10 +54,9 @@ using namespace std;
 static void calculate_PCPU(proc_t &proc_r){
   unsigned long long used_jiffies;
   unsigned long pcpu = 0;
-  double uptime_secs;
   unsigned long long seconds;
-  used_jiffies = proc_r.utime + proc_r.stime;
 
+  used_jiffies = proc_r.utime + proc_r.stime;
   seconds = seconds_since_boot - proc_r.start_time / Hertz;
   if (seconds > 0) {
       pcpu = (used_jiffies * 1000ULL / Hertz) / seconds;
@@ -69,12 +69,12 @@ int local_mon(string cmd_name) {
     PROCTAB *proc = openproc(PROC_FILLMEM | PROC_FILLSTAT | PROC_FILLWCHAN | PROC_FILLCOM);
     proc_t proc_info = {};
 
-    cout << "host and command\t" << "state\t" << "\tCPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
+    cout << "host and command\t" << "state\t" << "CPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
     while(readproc(proc, &proc_info) != NULL) {
         string proc_name(proc_info.cmd);
         if (proc_name == cmd_name) {
             calculate_PCPU(proc_info);
-            cout << "localhost " << proc_info.cmd << "\t"<< proc_info.state << "\t\t\t" << proc_info.pcpu << "\t\t" << proc_info.resident << "\t\t\t" << proc_info.utime << "\t\t\t" << proc_info.stime << endl;
+            cout << "localhost " << proc_info.cmd << "\t  "<< proc_info.state << "\t\t" << (float)proc_info.pcpu / 10.0 << "%\t\t" << proc_info.resident << "\t\t\t" << proc_info.utime << "\t\t\t" << proc_info.stime << endl;
         } else {
             // cout << "Not interested in " << proc_info.cmd << endl;
         } /* endif */
@@ -164,12 +164,14 @@ int remote_mon(string host_name, string cmd_name) {
                 in.read((char*)&xfp->proc_info, xfp->xfer_hdr.xfer_len-sizeof(xfp_header));
 //                cout << "xfer len is " << xfp->xfer_hdr.xfer_len << endl;
                 if (xfp->xfer_hdr.proc_info_len != sizeof(xfp->proc_info)) {
-                    cerr << " Remote report structure size is not what I expect, quitting." << endl;
+                    cerr << " Remote report structure size is not what I expect, quitting." <<
+                         " Remote struct size " <<  xfp->xfer_hdr.proc_info_len <<
+                         " local struct size " <<  sizeof(xfp->proc_info) << endl;
                     exit(1);
                 } /* endif */
                 string proc_name(xfp->proc_info.cmd);
                 if (proc_name == cmd_name) {
-                    cout << host + " " + xfp->proc_info.cmd << "\t\t  " << xfp->proc_info.state << "\t\t" << xfp->proc_info.pcpu << "\t\t" << xfp->proc_info.resident << "\t\t\t" << xfp->proc_info.pcpu << "\t\t\t" << xfp->proc_info.stime << endl;
+                    cout << host + " " + xfp->proc_info.cmd << "\t\t  " << xfp->proc_info.state << "\t\t" << (float)xfp->proc_info.pcpu / 10.0 << "%\t\t" << xfp->proc_info.resident << "\t\t\t" << xfp->proc_info.utime << "\t\t\t" << xfp->proc_info.stime << endl;
                 } else {
                     // cout << "Not interested in " << proc_info.cmd << endl;
                 } /* endif */
@@ -184,16 +186,17 @@ int remote_mon(string host_name, string cmd_name) {
 } /* remote_mon */
 
 int main(int argc, char *argv[], char *env[]) {
+    list<string> cmd_hostpairs;                             // List of commands @ hosts to monitor
     string cmd_name;
     string host_name;
     string lalala;
     char ch;
     bool bin_mon = false;
+    size_t at_found;
 
     static struct option long_options[] = {
         { "binary", no_argument, NULL, 'b' },               // Output proc entries in binary for remote
-        { "hostname", required_argument, NULL, 'h' },       // Hostname to ssh to for remote monitor
-        { "procname", required_argument, NULL, 'p' },       // Process/command name to look for
+        { "procname", required_argument, NULL, 'p' },       // Process/command@hostname name to look for multiples are acceptable
         { "lalala", optional_argument, NULL, 'l' },         // (Fingers in ears)
         { 0,0,0,0}
     }; /* struct option */
@@ -204,11 +207,8 @@ int main(int argc, char *argv[], char *env[]) {
              case 'b':
                  bin_mon = true;
                  break;
-            case 'h':
-                host_name = string(optarg);
-                break;
             case 'p':
-                cmd_name = string(optarg);
+                cmd_hostpairs.push_back(string(optarg));
                 break;
              case 'l':
                  lalala = string(optarg);
@@ -220,6 +220,16 @@ int main(int argc, char *argv[], char *env[]) {
     sysinfo(&this_sys_info);
     seconds_since_boot = this_sys_info.uptime;
 
+    string this_cmd = cmd_hostpairs.front();
+
+    at_found = this_cmd.find('@');
+    if (at_found == string::npos) {
+        host_name = "";
+    } else {
+        host_name = this_cmd.substr(at_found+1);
+    } /* endif */
+    cmd_name = this_cmd.substr(0, at_found);
+cout << "this_cmd = " << this_cmd << " host_name = " << host_name << " cmd = " << cmd_name << endl;
     if (host_name.empty()) { /* Assume a local monitor */
         if (bin_mon) {
             binary_mon(cmd_name);
