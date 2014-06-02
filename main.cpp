@@ -15,12 +15,12 @@
 #include "pstream.h"
 
 typedef struct xfer_hdr {
-    unsigned short xfer_len;
     unsigned int proc_info_offset;
-    unsigned short proc_info_len;
     unsigned int cmdline_offset;
-    unsigned short cmdline_len;
     unsigned int wchan_offset;
+    unsigned short xfer_len;
+    unsigned short proc_info_len;
+    unsigned short cmdline_len;
     unsigned short wchan_len;
 } xfer_hdr_t;
 
@@ -65,16 +65,23 @@ static void calculate_PCPU(proc_t &proc_r){
   proc_r.pcpu = pcpu;
 }
 
-int local_mon(string cmd_name) {
-    PROCTAB *proc = openproc(PROC_FILLMEM | PROC_FILLSTAT | PROC_FILLWCHAN | PROC_FILLCOM);
+int local_mon(string cmd_name, bool do_header=false) {
+    PROCTAB *proc = openproc(PROC_FILLMEM | PROC_FILLSTAT | PROC_FILLSTATUS |PROC_FILLWCHAN | PROC_FILLCOM);
     proc_t proc_info = {};
 
-    cout << "host and command\t" << "state\t" << "CPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
+    if (do_header) {
+        cout << "host and command\t" << "state\t" << "CPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
+    } /* endif */
     while(readproc(proc, &proc_info) != NULL) {
         string proc_name(proc_info.cmd);
         if (proc_name == cmd_name) {
+            string host;
             calculate_PCPU(proc_info);
-            cout << "localhost " << proc_info.cmd << "\t  "<< proc_info.state << "\t\t" << (float)proc_info.pcpu / 10.0 << "%\t\t" << proc_info.resident << "\t\t\t" << proc_info.utime << "\t\t\t" << proc_info.stime << endl;
+            host = "localhost";
+            host.resize(8,' ');
+            string prt_cmd = proc_info.cmd;
+            prt_cmd.resize(8,' ');
+            cout << host + " " + prt_cmd  << "\t  "<< proc_info.state << "\t\t" << (float)proc_info.pcpu / 10.0 << "%\t\t" << proc_info.resident << "\t\t\t" << proc_info.utime << "\t\t\t" << proc_info.stime << endl;
         } else {
             // cout << "Not interested in " << proc_info.cmd << endl;
         } /* endif */
@@ -98,29 +105,29 @@ int binary_mon(string cmd_name) {
         } else {
             cmd_line_len = 0;
         } /* endif */
-        xfp = xfer_t_alloc(cmd_line_len, strnlen(wchan_name,64));
-        if (!xfp) {
-            abort();
-        } else {
-            xfp->proc_info = tmp_proc_t;
-            string proc_name(xfp->proc_info.cmd);
-            if (proc_name == cmd_name) {
+        string proc_name(tmp_proc_t.cmd);
+        if (proc_name == cmd_name) {
+            xfp = xfer_t_alloc(cmd_line_len, strnlen(wchan_name,64));
+            if (!xfp) {
+                abort();
+            } else {
+                xfp->proc_info = tmp_proc_t;
                 calculate_PCPU(xfp->proc_info);
                 strncpy(&xfp->strings[xfp->xfer_hdr.cmdline_offset], *tmp_proc_t.cmdline, cmd_line_len);
                 strncpy(&xfp->strings[xfp->xfer_hdr.wchan_offset], wchan_name, xfp->xfer_hdr.wchan_len);
                 cout.write((char *)xfp, xfp->xfer_hdr.xfer_len);
                 ++entries_found;
-            } else {
-                // cout << "Not interested in " << proc_info.cmd << endl;
+                free(xfp);
+                xfp = NULL;
             } /* endif */
-            free(xfp);
-            xfp = NULL;
+        } else {
+            // cout << "Not interested in " << proc_info.cmd << endl;
         } /* endif */
     } /* endwhile */
     return 0;
 } /* binary_mon */
 
-int remote_mon(string host_name, string cmd_name) {
+int remote_mon(string host_name, string cmd_name, bool do_header=false) {
     // print names of all header files in current directory
     size_t dot_found = host_name.find('.');
     string host;
@@ -134,7 +141,9 @@ int remote_mon(string host_name, string cmd_name) {
     } else {
         host = host_name;               /* No dot found, just use the name */
     }
-    cout << "host and command\t" << "state\t" << "CPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
+    if (do_header) {
+        cout << "host and command\t" << "state\t" << "CPU utilization\t" << "Resident memory pages\t" << "user mode CPU time\t" << "kernel mode CPU time" << endl;
+    } /* endif */
     while (!in.eof()) {
         xfer_hdr_t xfp_header;
 
@@ -161,8 +170,11 @@ int remote_mon(string host_name, string cmd_name) {
                 abort();
             } else {
                 xfp->xfer_hdr = xfp_header;
-                in.read((char*)&xfp->proc_info, xfp->xfer_hdr.xfer_len-sizeof(xfp_header));
-//                cout << "xfer len is " << xfp->xfer_hdr.xfer_len << endl;
+                in.read((char*)xfp + sizeof(xfp_header), xfp->xfer_hdr.xfer_len-sizeof(xfp_header));
+                if (in.eof()) {
+                    abort();
+                }
+//                cout << "xfer len is " << xfp->xfer_hdr.xfer_len << " bytes_read = " << xfp->xfer_hdr.xfer_len-sizeof(xfp_header) << endl;
                 if (xfp->xfer_hdr.proc_info_len != sizeof(xfp->proc_info)) {
                     cerr << " Remote report structure size is not what I expect, quitting." <<
                          " Remote struct size " <<  xfp->xfer_hdr.proc_info_len <<
@@ -170,8 +182,12 @@ int remote_mon(string host_name, string cmd_name) {
                     exit(1);
                 } /* endif */
                 string proc_name(xfp->proc_info.cmd);
+//                cout << "xfer cmd name " << proc_name << " cmd name is " << cmd_name << endl;
                 if (proc_name == cmd_name) {
-                    cout << host + " " + xfp->proc_info.cmd << "\t\t  " << xfp->proc_info.state << "\t\t" << (float)xfp->proc_info.pcpu / 10.0 << "%\t\t" << xfp->proc_info.resident << "\t\t\t" << xfp->proc_info.utime << "\t\t\t" << xfp->proc_info.stime << endl;
+                    host.resize(8,' ');
+                    string prt_cmd = xfp->proc_info.cmd;
+                    prt_cmd.resize(8,' ');
+                    cout << host + " " + prt_cmd << "\t  " << xfp->proc_info.state << "\t\t" << (float)xfp->proc_info.pcpu / 10.0 << "%\t\t" << xfp->proc_info.resident << "\t\t\t" << xfp->proc_info.utime << "\t\t\t" << xfp->proc_info.stime << endl;
                 } else {
                     // cout << "Not interested in " << proc_info.cmd << endl;
                 } /* endif */
@@ -180,8 +196,6 @@ int remote_mon(string host_name, string cmd_name) {
             } /* endif */
         } /* endif */
     } /* endwhile */
-
-//    cout << "remote_mon not done yet " << endl;
     return 0;
 } /* remote_mon */
 
@@ -219,27 +233,28 @@ int main(int argc, char *argv[], char *env[]) {
     Hertz = sysconf(_SC_CLK_TCK);
     sysinfo(&this_sys_info);
     seconds_since_boot = this_sys_info.uptime;
-
-    string this_cmd = cmd_hostpairs.front();
-
-    at_found = this_cmd.find('@');
-    if (at_found == string::npos) {
-        host_name = "";
-    } else {
-        host_name = this_cmd.substr(at_found+1);
-    } /* endif */
-    cmd_name = this_cmd.substr(0, at_found);
-cout << "this_cmd = " << this_cmd << " host_name = " << host_name << " cmd = " << cmd_name << endl;
-    if (host_name.empty()) { /* Assume a local monitor */
-        if (bin_mon) {
-            binary_mon(cmd_name);
+    bool do_header = true;
+    for (string &this_cmd : cmd_hostpairs) {
+        at_found = this_cmd.find('@');
+        if (at_found == string::npos) {
+            host_name = "";
         } else {
-            local_mon(cmd_name);
+            host_name = this_cmd.substr(at_found+1);
         } /* endif */
-    } else {
-        /* Do a remote monitor by running an ssh command to the host */
-        remote_mon(host_name, cmd_name);
-    } /* endif */
+        cmd_name = this_cmd.substr(0, at_found);
+//        cerr << "this_cmd = " << this_cmd << " host_name = " << host_name << " cmd = " << cmd_name << endl;
+        if (host_name.empty()) { /* Assume a local monitor */
+            if (bin_mon) {
+                binary_mon(cmd_name);
+            } else {
+                local_mon(cmd_name, do_header);
+            } /* endif */
+        } else {
+            /* Do a remote monitor by running an ssh command to the host */
+            remote_mon(host_name, cmd_name, do_header);
+        } /* endif */
+        do_header = false;
+    } /* endfor */
 
     return 0;
 
